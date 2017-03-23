@@ -3,7 +3,7 @@ XSPEC models for modelling the relativistically broadened emission lines and blu
 
 laor3 is the emission line model. kdblur3 is the convolution kernel for blurring a rest-frame reflection spectrum.
 
-The XSPEC model function is written in C++ (compconv.cxx) but calls Fortran routines to perform the calculation (docompconf.f). The XSPEC model definition is in lmodel_kdblur3.dat.
+The XSPEC model functions are written in C++ but call Fortran routines to perform the calculations. The XSPEC model definition is in lmodel_kdblur3.dat.
 
 Parameters
 ----------
