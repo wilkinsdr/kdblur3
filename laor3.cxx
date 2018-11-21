@@ -1,370 +1,216 @@
-/*
- 
- laor3.cxx
- 
- XSPEC model for relativistically broadened emission line from an accretion 
- disc with a twice-broken power law emissivity profile.
- 
- Based on laor2 by A.C. Fabian and R.M. Johnstone.
- 
- v2.0, November 2014, D.R. Wilkins
- 
- */
+// An emission line from an accretion disk around a BH including GR effects
+// Laor ApJ 376, 90
+//
+// Twice-broken power law version
+// D.R. Wilkins - October 21, 2018
+//
+// Parameters
+//   0     line energy (keV)
+//   1     alpha, power law index for emissivity (R^-alpha)
+//   2     inner radius in units of GM/c^2
+//   3     outer radius in units of GM/c^2
+//   4     inclination (degrees, face-on=0)
+//   5     inner break radius
+//   6     middle power-law dependence
+//   7     outer break radius
+//   8     outer power-law dependence
+
 #include <xsTypes.h>
-#include <stlToCArrays.h>
 #include <functionMap.h>
-#include <XSUtil/FunctionUtils/FunctionUtility.h>
-#include <XSUtil/FunctionUtils/xsFortran.h>
+#include <XSFunctions/Utilities/FunctionUtility.h>
 #include <XSUtil/Utils/XSutility.h>
-#include <fitsio.h>
+#include <XSUtil/Numerics/Numerics.h>
+#include <XSUtil/Numerics/LinearInterp.h>
+#include <CCfits/CCfits>
 #include <sstream>
-#include <cfortran.h>
 
-PROTOCCALLSFSUB17(LAORSB3,laorsb3,FLOATV,INT,FLOATV,INT,INT,INT,FLOATV,FLOATV,FLOATV,FLOATV,FLOATV,FLOATV,FLOATV,FLOATV,FLOATV,FLOATV,FLOATV)
-
-#define LAORSB3(ear,ne,param,nenrgy,nrad,nteta,efil,ebin,rad,incl,itrs,bin,start,end,fstart,fend,photar) \
-           CCALLSFSUB17(LAORSB3,laorsb3,FLOATV,INT,FLOATV,INT,INT,INT,FLOATV,FLOATV,FLOATV,FLOATV,FLOATV,FLOATV,FLOATV,FLOATV,FLOATV,FLOATV,FLOATV, \
-           ear,ne,param,nenrgy,nrad,nteta,efil,ebin,rad,incl,itrs,bin,start,end,fstart,fend,photar)
-
-namespace {
-   void errReturn(fitsfile* pFile, const string& context, int status);
-}
+// prototype for routine in laor.cxx
+void readLaorFile(RealArray& laorRadiusArray, RealArray& laorMidRadiusArray,
+		  RealArray& laorAngleArray, RealArray& laorEnergyArray,
+		  std::vector<RealArray>& laorTransferFnArray);
 
 
 extern "C" void laor3(const RealArray& energyArray, const RealArray& params,
-        int spectrumNumber, RealArray& flux, RealArray& fluxErr, 
-        const string& initString)
+	   int spectrumNumber, RealArray& fluxArray, RealArray& fluxErrArray, 
+	   const string& initString)
 {
+  using namespace Numerics;
+  
+  static bool first(true);
+  static RealArray laorRadiusArray, laorMidRadiusArray, laorAngleArray;
+  static RealArray laorEnergyArray;
+  static std::vector<RealArray> laorTransferFnArray;
+  
+  const size_t nE = energyArray.size();
+  const size_t nF = nE - 1;
 
-   // This subroutine calculates line profiles from an accretion disk around
-   // a Kerr BH with a twice-broken power law emissivity profile.
+  fluxArray.resize(nF);
+  fluxErrArray.resize(0);
 
-   // Parameters :
-   //    1:    Rest frame energy of line
-   //    2:    Power-law dependence of emission
-   //    3:    Inner radius of disk (in gravl radii)  >= 1.235
-   //    4:    Outer radius of disk (in gravl radii)  =< 400
-   //    5:    Inclination angle of disk (degrees, 0=face on)
-   //    6:    Break radius
-   //    7:    outer power-law dependence
+  // if this is the first time through read in the model file
 
-   // The transfer function is read from the file ari.bin
-   // The Radii are in the range 1.23 to 400, inclinations are from 0 to 1.
-   // There are 31 tabulated inclinations in steps of 0.033 from 0 to 1.
+  if ( first ) {
+    readLaorFile(laorRadiusArray, laorMidRadiusArray, laorAngleArray,
+		 laorEnergyArray, laorTransferFnArray);
+    first = false;
+  }
 
-   // kaa 1/17/95 modified to use FITS file.
-   //  kaa 9/6/96  added dynamic memory
+  // Set up energy array for the line. Note the use of the high energy bin
+  // and the low energy bin to suppress error messages from the interpolation
+  // program.
 
-   // Tabulated data:
-   //    nrad         Number of radii
-   //    nteta        Number of inclinations
-   //    NENRGY       Number of energies
-   //    radpt        Radii (in gravl radii)
-   //    inclpt       cos(inclination)
-   //    ebin         Energies (units of rest energy of line)
-   //    trspt        Transfer function
+  const size_t nlaorE = laorEnergyArray.size();
+  RealArray lineEnergyArray(nlaorE+3);
 
-   // Translated from laor2.f Jan 2009 (CG)
+  lineEnergyArray[0] = 0.0;
+  lineEnergyArray[1] = (3*laorEnergyArray[0]-laorEnergyArray[1]) * params[0] / 2.;
+  for (size_t i=2; i<=nlaorE; i++) {
+    lineEnergyArray[i] = (laorEnergyArray[i-2]+laorEnergyArray[i-1]) * params[0] / 2.;
+  }
+  lineEnergyArray[nlaorE+1] = (3*laorEnergyArray[nlaorE-1]-laorEnergyArray[nlaorE-2]) * params[0] / 2.;
+  lineEnergyArray[nlaorE+2] = 1.0e6;
 
-   using namespace XSutility;
+  // Initialize the flux array
+  
+  RealArray lineFluxArray(nlaorE+2);
+  lineFluxArray = 0.0;
 
-   static auto_array_ptr<float> apRad(0);
-   static auto_array_ptr<float> apIncl(0);
-   static auto_array_ptr<float> apEbin(0);
-   static auto_array_ptr<float> apEfil(0);
-   static auto_array_ptr<float> apTrs(0);
-   static auto_array_ptr<float> apBin(0);
+  // selecting the integer values of the radial bins which are at the inner and
+  // outer disk boundary (according to inner and outer radii)
 
-   static bool isFirst = true;
-   static int nrad=0;
-   static int nenergy=0;
-   static int nteta=0;
+  Real innerR = params[2];
+  Real outerR = params[3];
+  Real breakR1 = params[5];
+  Real breakR2 = params[7];
+  if ( breakR1 < innerR ) breakR1 = innerR;
+  if ( breakR1 > outerR ) breakR1 = outerR;
+  if ( breakR2 < innerR ) breakR2 = innerR;
+  if ( breakR2 > outerR ) breakR2 = outerR;
+  
+  const size_t nlaorRad = laorRadiusArray.size();
+  size_t iro = 0;
+  size_t irb1 = 0;
+  size_t irb2 = 0;
+  size_t iri = nlaorRad-1;
+  for (size_t i=0; i<nlaorRad-1; i++) {
+    if ( outerR <= laorRadiusArray[i] && outerR > laorRadiusArray[i+1] ) iro = i;
+    if ( innerR <= laorRadiusArray[i] && innerR > laorRadiusArray[i+1] ) iri = i;
+    if ( breakR1 <= laorRadiusArray[i] && breakR1 > laorRadiusArray[i+1] ) irb1 = i;
+    if ( breakR2 <= laorRadiusArray[i] && breakR2 > laorRadiusArray[i+1] ) irb2 = i;
+  }
 
-   // If the first time round then read in the data 
+  // Set the cos(inclination) variable.
+  
+  Real inclin = cos(params[4]*3.14159/180.);
 
-   if (isFirst)
-   {
-      string laorFile(FunctionUtility::modelDataPath());
-      const string fName("ari.mod");
-      laorFile += "ari.mod";
-      fitsfile *pFile=0;
-      int status=0;
-      if (fits_open_file(&pFile, const_cast<char*>(laorFile.c_str()), 0, &status))
-      {
-         std::ostringstream err;
-         err << "Failed to open " << laorFile << "\nFITSIO error = "
-            << status << " in LAOR3\n";
-         xs_write(const_cast<char*>(err.str().c_str()), 10);
-         return;
-      }
+  //  find the tabulated inclinations above and below that requested
+  //  and the associated weights
 
-      // Go to the second extension to get the radii
+  const size_t nlaorAngles = laorAngleArray.size();
 
-      if (fits_movabs_hdu(pFile, 2, 0, &status))
-      {
-         string context("Failed to open second extension in " + fName);
-         errReturn(pFile, context, status);
-         return;
-      }
+  size_t inclow = 0;
+  while ( inclin > laorAngleArray[inclow] && inclow < nlaorAngles-1 ) inclow++;
+  if ( inclow > 0 ) inclow--;
+  Real angleBinSize = laorAngleArray[inclow+1] - laorAngleArray[inclow];
+  Real wlow = (laorAngleArray[inclow+1]-inclin)/angleBinSize;
+  Real whgh = (inclin-laorAngleArray[inclow])/angleBinSize;
 
-      long lnrad=0;
-      if (fits_read_key_lng(pFile, "NAXIS2", &lnrad, 0, &status))
-      {
-         string context("Failed to get size of RADIUS data");
-         errReturn(pFile, context, status);
-         return;
-      }
+  // Summing the profiles of individual rings according to a given
+  // weight function
 
-      int anynul=0;
-      float* oldF = apRad.reset(new float[lnrad]);
-      delete [] oldF;
-      if (fits_read_col_flt(pFile, 1, 1, 1, lnrad, 0., apRad.get(),
-                &anynul, &status))
-      {
-         string context("Failed to read RADIUS data");
-         errReturn(pFile, context, status);
-         return;
-      }
+  for (size_t j=iro; j<=iri; j++) {
 
-      // Go to the third extension to get the angles
+    Real r = laorRadiusArray[j];
+    Real area = 0.0;
+    if ( j == iro ) {
+      r = laorMidRadiusArray[iro];
+      area = params[3]*params[3] - r*r;
+    } else if ( j == iri ) {
+      r = laorMidRadiusArray[iri-1];
+      area = r*r - params[2]*params[2];
+    } else {
+      area = laorMidRadiusArray[j-1]*laorMidRadiusArray[j-1] -
+	     laorMidRadiusArray[j]*laorMidRadiusArray[j];
+    }
 
-      if (fits_movabs_hdu(pFile, 3, 0, &status))
-      {
-         string context("Failed to open third extension in " + fName);
-         errReturn(pFile, context, status);
-         return;
-      }
+    // ems-the radial weight function
 
-      long lnteta=0; 
-      if (fits_read_key_lng(pFile, "NAXIS2", &lnteta, 0, &status))
-      {
-         string context("Failed to get size of ANGLE data");
-         errReturn(pFile, context, status);
-         return;
-      }
+    Real rb1 = laorRadiusArray[irb1];
+    Real rb1p1 = laorRadiusArray[irb1+1];
+    Real rb2 = laorRadiusArray[irb2];
+    Real rb2p1 = laorRadiusArray[irb2+1];
+    Real ems;
+    if ( r < rb1 ) {
+      ems = area * pow(r, -params[1]);
+    } else if ( r == rb1 ) {
+      Real breakFract = (breakR1-rb1p1)/(r-rb1p1);
+      ems = breakFract * area * pow(r, -params[1])
+	+ (1.0-breakFract) * area * pow(breakR1, (-params[1]+params[6])) * pow(r, -params[6]);
+    } else if ( r < rb2 ) {
+      ems = area * pow(breakR1, (-params[1]+params[6])) * pow(r, -params[6]);
+    } else if ( r == rb2 ) {
+      Real breakFract = (breakR2-rb2p1)/(r-rb2p1);
+      ems = breakFract * area * pow(breakR1, (-params[1]+params[6])) * pow(r, -params[6])
+    + (1.0-breakFract) * area * pow(breakR1, (-params[1]+params[6])) * pow(breakR2, (-params[6]+params[8])) * pow(r, -params[8]);
+    } else {
+      ems = area * pow(breakR1, (-params[1]+params[6])) * pow(breakR2, (-params[6]+params[8])) * pow(r, -params[8]);
+    }
 
-      oldF = apIncl.reset(new float[lnteta]);
-      delete [] oldF;
-      if (fits_read_col_flt(pFile, 1, 1, 1, lnteta, 0., apIncl.get(),
-                &anynul, &status))
-      {
-         string context("Failed to read ANGLE data");
-         errReturn(pFile, context, status);
-         return;
-      }
+    // sum in the required transfer functions
 
-      // Go to the fourth extension to get the energies
+    size_t ioff = j*nlaorAngles + inclow;
 
-      if (fits_movabs_hdu(pFile, 4, 0, &status))
-      {
-         string context("Failed to open fourth extension in " + fName);
-         errReturn(pFile, context, status);
-         return;
-      }
+    for (size_t ie=0; ie<nlaorE; ie++) {
+      lineFluxArray[ie+1] += wlow*laorTransferFnArray[ioff][ie]*ems;
+    }
 
-      long lnenergy=0;
-      if (fits_read_key_lng(pFile, "NAXIS2", &lnenergy, 0, &status))
-      {
-         string context("Failed to get size of ENERGY data");
-         errReturn(pFile, context, status);
-         return;
-      }
+    ioff ++;
+    for (size_t ie=0; ie<nlaorE; ie++) {
+      lineFluxArray[ie+1] += whgh*laorTransferFnArray[ioff][ie]*ems;
+    }
 
-      oldF = apEbin.reset(new float[lnenergy]);
-      delete [] oldF;
-      if (fits_read_col_flt(pFile, 1, 1, 1, lnenergy, 0., apEbin.get(),
-                &anynul, &status))
-      {
-         string context("Failed to read ENERGY data");
-         errReturn(pFile, context, status);
-         return;
-      }
+    // end loop over radii
+  }
 
-      // Get the memory for the efilpt array
-      oldF = apEfil.reset(new float[lnenergy+3]);
-      delete [] oldF;
+  // Perform 3-pt smoothing to reduce the small wiggles which result
+  // from the finite number of radial bins
 
-      // Go to the fifth extension to read the transfer function
+  RealArray smo(3);
 
-      if (fits_movabs_hdu(pFile, 5, 0, &status))
-      {
-         string context("Failed to open fifth extension in " + fName);
-         errReturn(pFile, context, status);
-         return;
-      }
+  smo[0] = lineFluxArray[1];
+  smo[1] = lineFluxArray[2];
+  size_t ismo = 2;
+  for (size_t i=1; i<nlaorE-2; i++) {
+    smo[ismo] = lineFluxArray[i+2];
+    ismo++;
+    if ( ismo == 3 ) ismo = 0;
+    lineFluxArray[i+1] = 0.;
+    for (size_t j=0; j<3; j++) lineFluxArray[i+1] += smo[j];
+    lineFluxArray[i+1] /= 3.0;
+  }
 
-      oldF = apTrs.reset(new float[lnrad*lnteta*lnenergy]);
-      delete [] oldF;
-      if (fits_read_col_flt(pFile, 1, 1, 1, lnrad*lnteta*lnenergy, 0., 
-                apTrs.get(), &anynul, &status))
-      {
-         string context("Failed to read transfer function");
-         errReturn(pFile, context, status);
-         return;
-      }
+  // Rebin onto passed energies
 
-      fits_close_file(pFile, &status);
+  size_t inputBin;
+  size_t outputBin;
+  IntegerVector startBin(fluxArray.size());
+  IntegerVector endBin(fluxArray.size());
+  RealArray startWeight(fluxArray.size());
+  RealArray endWeight(fluxArray.size());
 
-      oldF = apBin.reset(new float[lnenergy+2]);
-      delete [] oldF;
+  const Real FUZZY = 1.0e-6;
 
-      nrad = static_cast<int>(lnrad);
-      nteta = static_cast<int>(lnteta);
-      nenergy = static_cast<int>(lnenergy);
+  Rebin::findFirstBins(lineEnergyArray, energyArray, FUZZY, inputBin, outputBin);
+  Rebin::initializeBins(lineEnergyArray, energyArray, FUZZY, inputBin, outputBin,
+				  startBin, endBin, startWeight, endWeight);
 
-   } // end if isFirst
+  Rebin::rebin(lineFluxArray, startBin, endBin, startWeight, endWeight, fluxArray);
 
-   // allocate memory for inibin/erebin work arrays
-   int nE = static_cast<int>(energyArray.size()) - 1;
-   auto_array_ptr<float> apStart(new float[nE]);
-   auto_array_ptr<float> apEnd(new float[nE]);
-   auto_array_ptr<float> apFstart(new float[nE]);
-   auto_array_ptr<float> apFend(new float[nE]);
+  // normalise values to total
 
-   // call the subroutine to do the actual calculation
+  Real spm = fluxArray.sum();
+  if ( spm > 0.0 && spm != 1.0 ) fluxArray /= spm;
 
-   float *ear=0, *pars=0, *photar=0, *photer=0;
-   XSFunctions::stlToFloatArrays<float>(energyArray, params, flux, fluxErr,
-           ear, pars, photar, photer);
-   auto_array_ptr<float> apEar(ear);
-   auto_array_ptr<float> apPars(pars);
-   auto_array_ptr<float> apPhotar(photar);
-   auto_array_ptr<float> apPhoter(photer);
-
-   LAORSB3(ear, nE, pars, nenergy, nrad, nteta, apEfil.get(), apEbin.get(),
-        apRad.get(), apIncl.get(), apTrs.get(), apBin.get(), apStart.get(),
-        apEnd.get(), apFstart.get(), apFend.get(), photar);
-
-   XSFunctions::floatFluxToStl<float>(photar, photer, nE, false, flux, fluxErr);       
-
-   isFirst = false;      
 }
-
-namespace {
-   void errReturn(fitsfile* pFile, const string& context, int status)
-   {
-      std::ostringstream oss;
-      oss << context << "\nError in LAOR3 : status = " << status;
-      string fullMsg(oss.str());
-      xs_write(const_cast<char*>(fullMsg.c_str()), 10);
-      int status2=0;
-      fits_close_file(pFile, &status2);
-   }
-}
-
-
-
-void cppModelWrapper(const double* energy, int nFlux, const double* params,
-					 int spectrumNumber, double* flux, double* fluxError, const char* initStr,
-					 int nPar, void (*cppFunc)(const RealArray&, const RealArray&,
-											   int, RealArray&, RealArray&, const string&));
-
-void fcppModelWrapper(const float* energy, int nFlux, const float* params,
-					  int spectrumNumber, float* flux, float* fluxError,
-					  int nPar, void (*cppFunc)(const RealArray&, const RealArray&,
-												int, RealArray&, RealArray&, const string&));
-
-
-void cppModelWrapper(const double* energy, int nFlux, const double* params,
-					 int spectrumNumber, double* flux, double* fluxError, const char* initStr,
-					 int nPar, void (*cppFunc)(const RealArray&, const RealArray&,
-											   int, RealArray&, RealArray&, const string&))
-{
-	// Assumes energy points to arrays of size nFlux+1, flux and fluxError
-	// point to arrays of size nFlux (though they need not be initialized),
-	// and params points to an array of size nPar.
-	RealArray energy_C(energy, (size_t)nFlux+1);
-	RealArray params_C(params, nPar);
-	RealArray flux_C(flux, (size_t)nFlux);
-	RealArray fluxError_C(fluxError, (size_t)nFlux);
-	string cppStr;
-	if(initStr && strlen(initStr))
-	cppStr = initStr;
-	(*cppFunc)(energy_C, params_C, spectrumNumber, flux_C, fluxError_C, cppStr);
-	for (int i=0; i<nFlux; ++i)
-	{
-		flux[i] = flux_C[i];
-	}
-	if (fluxError_C.size())
-	{
-		for (int i=0; i<nFlux; ++i)
-		{
-			fluxError[i] = fluxError_C[i];
-		}
-	}
-}
-
-void fcppModelWrapper(const float* energy, int nFlux, const float* params,
-					  int spectrumNumber, float* flux, float* fluxError,
-					  int nPar, void (*cppFunc)(const RealArray&, const RealArray&,
-												int, RealArray&, RealArray&, const string&))
-{
-	// Assumes energy points to arrays of size nFlux+1, flux and fluxError
-	// point to arrays of size nFlux (though they need not be initialized),
-	// and params points to an array of size nPar.
-	RealArray energy_C(0.0, (size_t)nFlux+1);
-	RealArray params_C(0.0, nPar);
-	RealArray flux_C(0.0, (size_t)nFlux);
-	RealArray fluxError_C(0.0, (size_t)nFlux);
-	string cppStr;
-	
-	for (int i=0; i<nFlux+1; ++i)
-	{
-		energy_C[i] = (double)energy[i];
-	}
-	for (int i=0; i<nPar; ++i)
-	{
-		params_C[i] = (double)params[i];
-	}
-	for (int i=0; i<nFlux; ++i)
-	{
-		flux_C[i] = (double)flux[i];
-	}
-	if (fluxError)
-	{
-		for (int i=0; i<nFlux; ++i)
-		{
-			fluxError_C[i] = (double)fluxError[i];
-		}
-	}
-	
-	
-	(*cppFunc)(energy_C, params_C, spectrumNumber, flux_C, fluxError_C, cppStr);
-	
-	for (int i=0; i<nFlux; ++i)
-	{
-		flux[i] = (float)flux_C[i];
-	}
-	if (fluxError_C.size())
-	{
-		for (int i=0; i<nFlux; ++i)
-		{
-			fluxError[i] = (float)fluxError_C[i];
-		}
-	}
-}
-
-void f_laor3(const float* energy, int nFlux, const float* params,
-			 int spectrumNumber, float* flux, float* fluxError);
-
-void f_laor3(const float* energy, int nFlux, const float* params,
-			 int spectrumNumber, float* flux, float* fluxError)
-{
-	const size_t nPar = 9;
-	fcppModelWrapper(energy, nFlux, params, spectrumNumber, flux, fluxError,
-					 nPar, laor3);
-}
-
-void C_laor3(const double* energy, int nFlux, const double* params,
-			 int spectrumNumber, double* flux, double* fluxError, const char* initStr)
-{
-	const size_t nPar = 9;
-	cppModelWrapper(energy, nFlux, params, spectrumNumber, flux, fluxError,
-					initStr, nPar, laor3);
-}
-
-FCALLSCSUB6(f_laor3,LAOR3,laor3,FLOATV,INT,FLOATV,INT,FLOATV,FLOATV)
-FCALLSCSUB7(C_laor3,DLAOR3,dlaor3,DOUBLEV,INT,DOUBLEV,INT,DOUBLEV,DOUBLEV,STRING)
-
-
+  
 
