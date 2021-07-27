@@ -3,7 +3,7 @@
 // ACF and RMJ May/June 1998
 // kaa converted to C++ Aug 2018
 // kaa changed to use FFTs Aug 2019
-// DRW version for twice-broken power law emissivity, Aug 2019
+// DRW version for twice-broken power law emissivity, Jul 2021
 
 //  parameters :
 //       0        power law index for emissivity (10 for disk)
@@ -16,7 +16,6 @@
 //       7        outer power-law dependence
 
 #include <xsTypes.h>
-#include <functionMap.h>
 #include <XSUtil/Numerics/Convolution.h>
 
 extern "C" void laor3(const RealArray& energyArray, const RealArray& params,
@@ -35,7 +34,7 @@ extern "C" void kdblur3(const RealArray& energyArray, const RealArray& params,
   laor3Params[0] = (energyArray[energyArray.size()-1]+energyArray[0])/2.0;
   for (size_t i=0; i<8; i++) laor3Params[i+1] = params[i];
 
-  Numerics::ConvolutionInLnSpace<laor3>(energyArray, laor3Params, laor3Params[0], 
+  Numerics::ConvolutionInLnSpace<laor3>(energyArray, laor3Params, 0, 
 				       spectrumNumber, "", flux, fluxErr);
 
   return;
