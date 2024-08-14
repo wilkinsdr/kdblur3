@@ -2,7 +2,7 @@
 // Laor ApJ 376, 90
 //
 // Twice-broken power law version
-// D.R. Wilkins - October 21, 2018
+// D.R. Wilkins - last updated July 27, 2021
 //
 // Parameters
 //   0     line energy (keV)
@@ -16,7 +16,6 @@
 //   8     outer power-law dependence
 
 #include <xsTypes.h>
-#include <functionMap.h>
 #include <XSFunctions/Utilities/FunctionUtility.h>
 #include <XSUtil/Utils/XSutility.h>
 #include <XSUtil/Numerics/Numerics.h>

@@ -3,7 +3,7 @@
 // ACF and RMJ May/June 1998
 // kaa converted to C++ Aug 2018
 // kaa changed to use FFTs Aug 2019
-// DRW version for twice-broken power law emissivity, Aug 2019
+// DRW version for twice-broken power law emissivity, Jul 2021
 
 //  parameters :
 //       0        power law index for emissivity (10 for disk)
@@ -16,7 +16,6 @@
 //       7        outer power-law dependence
 
 #include <xsTypes.h>
-#include <functionMap.h>
 #include <XSUtil/Numerics/Convolution.h>
 
 extern "C" void laor3(const RealArray& energyArray, const RealArray& params,
